@@ -126,5 +126,15 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	}
 	resp.Body.Close()
 	t = uint16(time.Since(start) / time.Millisecond)
+	// Swell: re-measure on the reused (warm) connection so the reported latency
+	// excludes the TCP/TLS/proxy handshake, matching Karing/mihomo unified-delay.
+	// If the server dropped keep-alive, keep the cold value measured above.
+	start = time.Now()
+	resp, err = client.Do(req.WithContext(ctx))
+	if err != nil {
+		return t, nil
+	}
+	resp.Body.Close()
+	t = uint16(time.Since(start) / time.Millisecond)
 	return
 }
