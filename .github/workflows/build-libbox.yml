@@ -1,0 +1,95 @@
+name: Build Libbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release 版本名（作为 Release 标题 + tag，也是下载/SPM 引用的版本号；建议 SemVer，如 1.13.13-swell.1）"
+        required: true
+        type: string
+        default: "1.13.13-swell.1"
+
+jobs:
+  build:
+    runs-on: macOS-15
+
+    # Allow the workflow to push the version tag and publish a release
+    permissions:
+      contents: write
+
+    steps:
+      # --- Check out this fork (contains the urltest warm-RTT patch) ---
+      - uses: actions/checkout@v7
+
+      # --- Set up Go (matches go.mod: go 1.24.7) ---
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.7"
+
+      # --- Install gomobile toolchain ---
+      - name: Setup Gomobile
+        run: |
+          make lib_install
+          gomobile init
+
+      # --- Build the iOS xcframework (device + simulator slices) ---
+      - name: Build xcframework
+        run: |
+          go run ./cmd/internal/build_libbox -target apple -platform ios
+          zip -ry ./Libbox.xcframework.zip ./Libbox.xcframework
+
+      # --- Generate SHA-256 checksum for the archive ---
+      - name: Detect checksum
+        id: checksum
+        shell: bash
+        run: |
+          CHECKSUM=$(shasum -a 256 Libbox.xcframework.zip | awk '{print $1}')
+          echo "file_checksum=$CHECKSUM" >> "$GITHUB_ENV"
+
+      # --- Generate a SwiftPM manifest pointing at the new binary target ---
+      - name: Update Package.swift
+        shell: bash
+        run: |
+          cat > Package.swift <<EOF
+          // swift-tools-version: 5.7
+
+          import PackageDescription
+
+          let package = Package(
+            name: "Libbox",
+            platforms: [.iOS(.v12)],
+            products: [
+              .library(name: "Libbox", targets: ["Libbox"]),
+            ],
+            targets: [
+              .binaryTarget(
+                name: "Libbox",
+                url: "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.version }}/Libbox.xcframework.zip",
+                checksum: "${{ env.file_checksum }}"
+              )
+            ]
+          )
+          EOF
+
+      # --- Commit the manifest and push ONLY the version tag. ---
+      - name: Tag manifest
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          git commit -m "Libbox Release ${{ github.event.inputs.version }}"
+          git tag -f "${{ github.event.inputs.version }}"
+          git push -f origin "refs/tags/${{ github.event.inputs.version }}"
+
+      # --- Publish the GitHub release (attaches the xcframework to the tag) ---
+      - name: Upload Release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: false
+          tag_name: ${{ github.event.inputs.version }}
+          body: |
+            Swell core — built from SwellProxy/sing-box with the urltest warm-RTT patch.
+            iOS device + simulator slices. Consumable via SwiftPM (Package.swift at this tag).
+          files: Libbox.xcframework.zip
